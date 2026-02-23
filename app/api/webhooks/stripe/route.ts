@@ -28,8 +28,8 @@ export async function POST(req: Request) {
     }
 
     const supabaseAdmin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL || "http://localhost:54321",
-      process.env.SUPABASE_SERVICE_ROLE_KEY || "placeholder",
+      process.env.NEXT_PUBLIC_SUPABASE_URL || "http://localhost:3000",
+      process.env.SUPABASE_SERVICE_ROLE_KEY || "none",
     );
 
     const body = await req.text();
