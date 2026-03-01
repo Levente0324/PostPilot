@@ -3,9 +3,9 @@ import { BarChart3 } from "lucide-react";
 export default function InsightsPage() {
   return (
     <div className="min-h-full pb-10">
-      <header className="sticky top-0 z-40 h-20 px-4 md:px-8 flex flex-col md:flex-row md:items-center justify-between border-b border-light-clinical-gray bg-light-background">
+      <header className="sticky top-0 z-40 h-20 px-4 md:px-8 flex flex-col md:flex-row md:items-center justify-between shadow-sm border-b border-light-clinical-gray bg-light-background">
         <div className="hidden md:block">
-          <h1 className="font-sans text-3xl font-medium text-gray-900 tracking-wide leading-none">
+          <h1 className="font-sans text-4xl font-medium text-gray-900 tracking-wide leading-none">
             Insights
           </h1>
         </div>

@@ -70,6 +70,16 @@ export function resolvePlanFromPriceId(priceId: string): {
   if (elitePriceId && priceId === elitePriceId) {
     return { plan: "elite", limit: 50 };
   }
-  // Default to free for unknown price IDs — fail closed rather than granting access
+  // If a non-empty price ID doesn't match any known tier, default to "pro".
+  // The user paid for *something* — downgrading to free would be worse than
+  // granting minimum paid access. Log a warning so we can investigate.
+  if (priceId) {
+    console.warn(
+      `resolvePlanFromPriceId: unknown price ID "${priceId}". Defaulting to pro. ` +
+        `Expected PRO=${proPriceId ?? "(not set)"} or ELITE=${elitePriceId ?? "(not set)"}`,
+    );
+    return { plan: "pro", limit: 20 };
+  }
+  // Truly empty price ID — no subscription item at all
   return { plan: "free", limit: 3 };
 }

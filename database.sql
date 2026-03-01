@@ -233,6 +233,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_user_action_created ON usage_logs(user
 CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_stripe_customer_id_unique ON profiles(stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_social_accounts_user_provider_unique ON social_accounts(user_id, provider);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_stripe_webhook_event_id_unique ON stripe_webhook_events(event_id);
+-- Used by the cron job to delete usage_logs older than 90 days
+CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);
 
 -- DB-level guardrails for scheduling safety
 CREATE OR REPLACE FUNCTION public.enforce_scheduled_post_constraints()

@@ -108,41 +108,107 @@ function isActiveSubscriptionStatus(status: string | null | undefined) {
 /**
  * Creates a Stripe checkout session for the given plan.
  * Accepts plan as form data: "pro" or "elite".
- * If the user already has a paid plan, redirects them to the Stripe portal instead.
+ * If the user already has a paid plan and wants a DIFFERENT tier,
+ * we update their existing subscription in-place (no double subscription).
+ * If they're already on the same plan, redirect to the portal.
  */
 export async function createStripeCheckoutSession(formData?: FormData) {
   const stripe = getStripe();
   const appUrl = getRequiredEnv("APP_URL");
   const { customerId, user, profile } = await getOrCreateCustomerId();
 
-  // If already on a paid plan, redirect to portal to manage.
-  if (hasPaidAccess(profile ?? null)) {
-    const session = await stripe.billingPortal.sessions.create({
-      customer: customerId,
-      return_url: `${appUrl}/dashboard/account-billing`,
-    });
+  const requestedPlan = (formData?.get("plan") as string | null) ?? "pro";
 
-    if (!session.url) {
-      throw new Error("Stripe portal session did not return a URL.");
-    }
-
-    redirect(session.url);
-  }
-
-  // Determine which price to use.
-  const requestedPlan = formData?.get("plan") as string | null;
-  let priceId: string;
-
+  // Determine the target price ID
+  let targetPriceId: string;
   if (requestedPlan === "elite") {
-    priceId = process.env.STRIPE_ELITE_PRICE_ID || "";
-    if (!priceId) {
+    targetPriceId = process.env.STRIPE_ELITE_PRICE_ID || "";
+    if (!targetPriceId) {
       throw new Error(
         "STRIPE_ELITE_PRICE_ID is not configured. Please add it to your .env.local after creating the Elite product in Stripe.",
       );
     }
   } else {
-    // Default to pro.
-    priceId = getRequiredEnv("STRIPE_PRO_PRICE_ID");
+    targetPriceId = getRequiredEnv("STRIPE_PRO_PRICE_ID");
+  }
+
+  if (hasPaidAccess(profile ?? null)) {
+    // User already has an active paid plan.
+    // If they're already on the requested plan, send them to the portal to manage.
+    if (profile?.plan === requestedPlan) {
+      const session = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: `${appUrl}/dashboard/account-billing`,
+      });
+      if (!session.url)
+        throw new Error("Stripe portal session did not return a URL.");
+      redirect(session.url);
+    }
+
+    // They want a DIFFERENT plan — update their existing subscription in-place.
+    // This avoids creating a second subscription (bugs #9 and #10).
+    const subscriptions = await stripe.subscriptions.list({
+      customer: customerId,
+      status: "active",
+      limit: 1,
+    });
+
+    const activeSub = subscriptions.data[0];
+    if (activeSub) {
+      await stripe.subscriptions.update(activeSub.id, {
+        items: [
+          {
+            id: activeSub.items.data[0].id,
+            price: targetPriceId,
+          },
+        ],
+        proration_behavior: "always_invoice",
+      });
+
+      // Immediately update the DB so the redirected page shows the correct plan.
+      // The webhook will also fire and set the same values (idempotent).
+      const planLimits: Record<string, number> = { pro: 20, elite: 50 };
+      const adminForUpgrade = createAdminClient();
+      await adminForUpgrade
+        .from("profiles")
+        .update({
+          plan: requestedPlan,
+          monthly_post_limit: planLimits[requestedPlan] ?? 3,
+          subscription_status: "active",
+        })
+        .eq("id", user.id);
+
+      redirect(`${appUrl}/dashboard/account-billing?upgrade=success`);
+    }
+
+    // Edge case: no active subscription found despite hasPaidAccess — fall back to portal.
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: `${appUrl}/dashboard/account-billing`,
+    });
+    if (!portalSession.url)
+      throw new Error("Stripe portal session did not return a URL.");
+    redirect(portalSession.url);
+  }
+
+  // Free user — create a new checkout session.
+  // Belt-and-suspenders: also check Stripe directly for existing active subscriptions
+  // in case the DB is stale (e.g. webhook hasn't processed yet from a prior checkout).
+  const existingSubs = await stripe.subscriptions.list({
+    customer: customerId,
+    status: "active",
+    limit: 1,
+  });
+  if (existingSubs.data.length > 0) {
+    // Customer already has an active subscription in Stripe — redirect to portal
+    // instead of creating a duplicate subscription.
+    const portalFallback = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: `${appUrl}/dashboard/account-billing`,
+    });
+    if (!portalFallback.url)
+      throw new Error("Stripe portal session did not return a URL.");
+    redirect(portalFallback.url);
   }
 
   const session = await stripe.checkout.sessions.create({
@@ -157,7 +223,7 @@ export async function createStripeCheckoutSession(formData?: FormData) {
         supabaseUUID: user.id,
       },
     },
-    line_items: [{ price: priceId, quantity: 1 }],
+    line_items: [{ price: targetPriceId, quantity: 1 }],
     success_url: `${appUrl}/dashboard/account-billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${appUrl}/dashboard/account-billing?checkout=cancelled`,
     allow_promotion_codes: true,

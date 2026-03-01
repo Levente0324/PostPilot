@@ -188,6 +188,20 @@ export async function POST(request: Request) {
 }
 
 async function handlePublish(request: Request) {
+  // This route has been retired in favour of the Supabase Edge Function
+  // (supabase/functions/publish-scheduled/index.ts).
+  // Returning 410 Gone so cron-job.org stops retrying this URL and so
+  // concurrent calls cannot double-publish alongside the Edge Function.
+  return NextResponse.json(
+    {
+      error:
+        "This endpoint has been retired. Use the Supabase Edge Function instead.",
+    },
+    { status: 410 },
+  );
+
+  // ---- DEAD CODE BELOW — kept for reference if route is ever re-enabled ----
+  // eslint-disable-next-line no-unreachable
   if (!process.env.PUBLISH_JOB_SECRET) {
     return NextResponse.json(
       { error: "PUBLISH_JOB_SECRET is not configured." },
@@ -210,12 +224,12 @@ async function handlePublish(request: Request) {
     .eq("status", "scheduled")
     .lte("scheduled_for", nowIso)
     .order("scheduled_for", { ascending: true })
-    .limit(25);
+    .limit(5);
 
   if (scheduleError) {
     console.error(
       "Publish job: failed to query scheduled_posts",
-      scheduleError.message,
+      scheduleError?.message,
     );
     return NextResponse.json({ error: "Internal error." }, { status: 500 });
   }
@@ -323,6 +337,33 @@ async function handlePublish(request: Request) {
             error_message: (error?.message || "Publish failed").slice(0, 1000),
           })
           .eq("id", item.id);
+
+        // Clean up images from storage so permanently-failed posts
+        // don't accumulate files in the bucket indefinitely.
+        try {
+          const images = parseStoredImages(item.posts.image_url);
+          if (images.length > 0) {
+            const storagePaths = images
+              .map((url) => {
+                try {
+                  const urlObj = new URL(url);
+                  const parts = urlObj.pathname.split("/post-media/");
+                  return parts.length === 2 ? parts[1] : null;
+                } catch {
+                  return null;
+                }
+              })
+              .filter((p): p is string => p !== null);
+            if (storagePaths.length > 0) {
+              await admin.storage.from("post-media").remove(storagePaths);
+            }
+          }
+        } catch (cleanupErr) {
+          console.error(
+            `Failed-post image cleanup error for ${item.id}:`,
+            cleanupErr,
+          );
+        }
       } else {
         // Keep as scheduled so next cron run retries
         await admin

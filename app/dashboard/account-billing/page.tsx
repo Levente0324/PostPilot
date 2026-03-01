@@ -13,12 +13,14 @@ import {
   getPostLimit,
 } from "@/lib/subscription";
 import {
+  AlertTriangle,
   CheckCircle2,
   CreditCard,
   ExternalLink,
   Sparkles,
   Zap,
 } from "lucide-react";
+import Stripe from "stripe";
 import { redirect } from "next/navigation";
 
 export default async function AccountBillingPage({
@@ -44,6 +46,8 @@ export default async function AccountBillingPage({
   const metaError = typeof qp.meta_error === "string" ? qp.meta_error : null;
   const metaSuccess = typeof qp.meta === "string" ? qp.meta : null;
   const checkoutCancelled = checkout === "cancelled";
+  const upgradeSuccess =
+    typeof qp.upgrade === "string" && qp.upgrade === "success";
 
   // Guard: only process Stripe session IDs that look valid (starts with cs_, max 200 chars).
   // Prevents arbitrary session IDs being injected via URL manipulation.
@@ -63,9 +67,32 @@ export default async function AccountBillingPage({
 
   const { data: profile } = await supabase
     .from("profiles")
-    .select("plan, subscription_status")
+    .select("plan, subscription_status, stripe_customer_id")
     .eq("id", user.id)
     .single();
+
+  // Check if the paid subscription is set to cancel at period end
+  let cancelAtDate: Date | null = null;
+  if (profile?.stripe_customer_id && hasPaidAccess(profile)) {
+    try {
+      const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+      if (!stripeSecretKey)
+        throw new Error("STRIPE_SECRET_KEY is not configured.");
+      const stripe = new Stripe(stripeSecretKey, {
+        apiVersion: "2026-01-28.clover",
+      });
+      const subs = await stripe.subscriptions.list({
+        customer: profile.stripe_customer_id,
+        status: "active",
+        limit: 1,
+      });
+      if (subs.data[0]?.cancel_at_period_end && subs.data[0].cancel_at) {
+        cancelAtDate = new Date(subs.data[0].cancel_at * 1000);
+      }
+    } catch {
+      // Non-fatal — cancellation banner is informational only
+    }
+  }
 
   const { data: accounts } = await supabase
     .from("social_accounts")
@@ -128,6 +155,27 @@ export default async function AccountBillingPage({
           {checkout === "success" && !checkoutSyncError && (
             <div className="bg-white border border-green-200 rounded-xl shadow-sm px-6 py-4 text-sm text-green-600">
               🎉 Sikeres fizetés! A csomag aktiválva.
+            </div>
+          )}
+          {upgradeSuccess && (
+            <div className="bg-white border border-green-200 rounded-xl shadow-sm px-6 py-4 text-sm text-green-600">
+              🎉 Sikeresen váltottál csomagot! Az új csomag azonnal életbe lép.
+            </div>
+          )}
+          {cancelAtDate && (
+            <div className="bg-white border border-amber-200 rounded-xl shadow-sm px-6 py-4 flex items-start gap-3">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500 mt-0.5" />
+              <p className="text-sm text-amber-700">
+                Az előfizetésed lemondásra van ütemezve.{" "}
+                <span className="font-semibold">
+                  {cancelAtDate.toLocaleDateString("hu-HU", {
+                    year: "numeric",
+                    month: "long",
+                    day: "numeric",
+                  })}
+                </span>
+                -ig maradsz aktív. Utána ingyenes csomagra kerülsz vissza.
+              </p>
             </div>
           )}
           {metaError && (

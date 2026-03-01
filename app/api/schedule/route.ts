@@ -15,6 +15,7 @@ const scheduleSchema = z.object({
   imageUrls: z.array(z.string().url()).max(10).default([]),
   type: z.enum(["regular", "ai"]),
   editId: z.string().uuid().optional(),
+  scheduledFor: z.string().datetime().optional(),
 });
 
 function getDateRange(date: Date) {
@@ -76,11 +77,18 @@ export async function POST(req: Request) {
 
   const input = parsed.data;
 
-  const selectedDate = parse(
-    `${input.date} ${input.time}`,
-    "yyyy-MM-dd HH:mm",
-    new Date(),
-  );
+  // Use the client-provided ISO timestamp (browser timezone) when available.
+  // Falls back to server-side parse for backward compatibility.
+  let selectedDate: Date;
+  if (input.scheduledFor) {
+    selectedDate = new Date(input.scheduledFor);
+  } else {
+    selectedDate = parse(
+      `${input.date} ${input.time}`,
+      "yyyy-MM-dd HH:mm",
+      new Date(),
+    );
+  }
   if (!isValid(selectedDate)) {
     return NextResponse.json(
       { error: "Érvénytelen dátum vagy idő." },
@@ -160,6 +168,39 @@ export async function POST(req: Request) {
   const imageCount = input.imageUrls.length;
   const text = (input.text ?? "").trim();
   const description = (input.description ?? "").trim();
+
+  // Validate that all image URLs belong to THIS project's storage and the
+  // current user's folder. Comparing against the exact project origin prevents
+  // an attacker from referencing images hosted on a different Supabase project
+  // that happens to use routing paths containing the victim's user ID.
+  const supabaseOrigin = (() => {
+    try {
+      return new URL(process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").origin;
+    } catch {
+      return "";
+    }
+  })();
+  for (const imgUrl of input.imageUrls) {
+    try {
+      const parsed = new URL(imgUrl);
+      const expectedPrefix = `/storage/v1/object/public/post-media/${user.id}/`;
+      if (
+        !supabaseOrigin ||
+        parsed.origin !== supabaseOrigin ||
+        !parsed.pathname.startsWith(expectedPrefix)
+      ) {
+        return NextResponse.json(
+          { error: "Érvénytelen képfájl hivatkozás." },
+          { status: 400 },
+        );
+      }
+    } catch {
+      return NextResponse.json(
+        { error: "Érvénytelen képfájl URL." },
+        { status: 400 },
+      );
+    }
+  }
 
   if (input.platform === "instagram") {
     if (imageCount === 0) {

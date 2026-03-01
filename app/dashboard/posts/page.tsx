@@ -78,9 +78,9 @@ export default async function PostsPage() {
     <PostDashboardProvider>
       <div className="flex-1 flex flex-col h-full bg-light-background">
         {/* Sticky Header */}
-        <header className="sticky top-0 z-20 bg-light-background border-b border-light-clinical-gray/50 px-4 md:px-8 py-4 md:py-6 flex flex-col md:flex-row md:items-center justify-between">
+        <header className="sticky top-0 z-20 bg-light-background border-b border-light-clinical-gray shadow-sm px-4 md:px-8 py-4 md:py-[17.5px] flex flex-col md:flex-row md:items-center justify-between">
           <div className="flex items-center justify-between md:justify-start w-full md:w-auto">
-            <h1 className="hidden md:block font-sans text-2xl md:text-3xl font-bold tracking-tight text-gray-900 leading-none">
+            <h1 className="hidden md:block font-sans font-medium text-2xl md:text-4xl tracking-tight text-gray-900 leading-none">
               Ütemező Naptár
             </h1>
           </div>
@@ -96,7 +96,7 @@ export default async function PostsPage() {
             <div className="flex items-center gap-4">
               <div className="hidden md:flex items-center gap-2 px-4 py-2 bg-white border border-light-clinical-gray rounded text-xs font-medium">
                 <span className="w-2 h-2 rounded-full bg-green-500"></span>
-                <span className="text-gray-600">
+                <span className="text-gray-900">
                   {scheduledPosts.length} / {activeLimit} aktív poszt
                 </span>
               </div>

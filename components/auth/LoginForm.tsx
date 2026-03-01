@@ -24,6 +24,34 @@ export function LoginForm() {
     setError(null);
     setSuccess(null);
 
+    const toHungarianError = (message: string): string => {
+      const m = message.toLowerCase();
+      if (
+        m.includes("invalid login credentials") ||
+        (m.includes("email not confirmed") && signUpMode === false)
+      )
+        return "Hibás e-mail cím vagy jelszó. Ellenőrizd az adatokat és próbáld újra.";
+      if (m.includes("email not confirmed"))
+        return "Az e-mail cím még nincs megerősítve. Ellenőrizd a postaládád.";
+      if (m.includes("too many requests") || m.includes("rate limit"))
+        return "Túl sok próbálkozás. Kérlek, várj egy percet és próbáld újra.";
+      if (
+        m.includes("user already registered") ||
+        m.includes("already been registered")
+      )
+        return "Ez az e-mail cím már regisztrált. Próbálj bejelentkezni.";
+      if (
+        m.includes("password should be at least") ||
+        m.includes("password is too short")
+      )
+        return "A jelszónak legalább 6 karakterből kell állnia.";
+      if (m.includes("invalid email"))
+        return "Érvénytelen e-mail cím formátum.";
+      if (m.includes("signup is disabled"))
+        return "A regisztráció átmenetileg le van tiltva.";
+      return "Sikertelen hitelesítés. Ellenőrizd az e-mail és jelszó párost.";
+    };
+
     try {
       const supabase = createClient();
       if (signUpMode) {
@@ -55,10 +83,7 @@ export function LoginForm() {
         window.location.href = "/dashboard/posts";
       }
     } catch (authError: any) {
-      setError(
-        authError.message ||
-          "Sikertelen hitelesítés. Ellenőrizd az e-mail és jelszó párost.",
-      );
+      setError(toHungarianError(authError.message ?? ""));
     } finally {
       setLoading(false);
     }

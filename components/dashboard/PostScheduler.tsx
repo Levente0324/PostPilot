@@ -41,6 +41,7 @@ import {
 import { useRouter } from "next/navigation";
 import { gsap } from "gsap";
 import dynamic from "next/dynamic";
+import { createClient as createSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 const EmojiPicker = dynamic(
   () => {
@@ -48,6 +49,18 @@ const EmojiPicker = dynamic(
   },
   { ssr: false },
 );
+
+// Allowed MIME types for direct-to-Supabase uploads
+const ALLOWED_UPLOAD_TYPES: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/heic": "heic",
+  "image/heif": "heif",
+};
+const MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024; // 10MB per file — plenty for social media
+const MAX_UPLOAD_TOTAL_BYTES = 30 * 1024 * 1024; // 30MB total per upload session
 
 type ScheduledPost = {
   id: string;
@@ -172,6 +185,17 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
     const [editingPostId, setEditingPostId] = useState<string | null>(null);
     const [postToDelete, setPostToDelete] = useState<string | null>(null);
     const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+    // Tracks image URLs that existed when the modal opened (for edit).
+    // Used to determine which images are newly uploaded and need cleanup on cancel.
+    const [originalImageUrls, setOriginalImageUrls] = useState<Set<string>>(
+      new Set(),
+    );
+    const emojiButtonRef = useRef<HTMLButtonElement>(null);
+    const emojiPickerRef = useRef<HTMLDivElement>(null);
+    const [emojiPickerPos, setEmojiPickerPos] = useState<{
+      top: number;
+      left: number;
+    } | null>(null);
 
     const now = new Date();
     const minDate = startOfDay(now);
@@ -198,6 +222,21 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
       }, rootRef);
       return () => ctx.revert();
     }, []);
+
+    // Close emoji picker when clicking outside both the button AND the picker
+    useEffect(() => {
+      if (!showEmojiPicker) return;
+      const handler = (e: MouseEvent) => {
+        const target = e.target as Node;
+        const insideButton = emojiButtonRef.current?.contains(target) ?? false;
+        const insidePicker = emojiPickerRef.current?.contains(target) ?? false;
+        if (!insideButton && !insidePicker) {
+          setShowEmojiPicker(false);
+        }
+      };
+      document.addEventListener("mousedown", handler);
+      return () => document.removeEventListener("mousedown", handler);
+    }, [showEmojiPicker]);
 
     const daysInMonth = useMemo(
       () =>
@@ -273,6 +312,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
       setAiError(null);
       setEditingPostId(null);
       setShowEmojiPicker(false);
+      setOriginalImageUrls(new Set());
     };
 
     const openEditChoice = (post: ScheduledPost) => {
@@ -297,11 +337,14 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
             url,
           }));
           setImages(loadedImages);
+          setOriginalImageUrls(new Set(parsedUrls));
         } else {
           setImages([]);
+          setOriginalImageUrls(new Set());
         }
       } catch {
         setImages([]);
+        setOriginalImageUrls(new Set());
       }
 
       setTime(format(parseISO(post.scheduled_for), "HH:mm"));
@@ -332,6 +375,20 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
       setShowEmojiPicker(false);
     };
 
+    /** Called when user explicitly cancels / closes without saving.
+     *  Deletes any newly uploaded images that aren't part of the saved post. */
+    const cancelAndCloseModal = () => {
+      const newlyUploadedUrls = images
+        .map((img) => img.url)
+        .filter((url) => !originalImageUrls.has(url));
+      for (const url of newlyUploadedUrls) {
+        fetch(`/api/uploads?url=${encodeURIComponent(url)}`, {
+          method: "DELETE",
+        }).catch(() => {});
+      }
+      closeAllModals();
+    };
+
     const uploadFiles = async (files: FileList | null) => {
       if (!files?.length) return;
       if (images.length >= 10) {
@@ -348,27 +405,92 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
         setError(
           `Már csak ${remainingSlots} kép adható hozzá (maximum 10/poszt).`,
         );
+      } else {
+        setError(null);
       }
-      setUploading(true);
-      if (Array.from(files).length <= remainingSlots) setError(null);
-      try {
-        const formData = new FormData();
-        selectedFiles.forEach((f) => formData.append("files", f));
-        const response = await fetch("/api/uploads", {
-          method: "POST",
-          body: formData,
-        });
-        const payload = await response.json();
-        if (!response.ok) {
-          setError(payload.error || "A képfeltöltés sikertelen.");
+
+      // Client-side validation before upload
+      const totalNewBytes = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+      if (totalNewBytes > MAX_UPLOAD_TOTAL_BYTES) {
+        setError(
+          `A kijelölt képek összmérete meghaladja a 30MB-os korlátot. Kérlek, válassz kevesebb vagy kisebb képet.`,
+        );
+        return;
+      }
+      for (const file of selectedFiles) {
+        if (!ALLOWED_UPLOAD_TYPES[file.type]) {
+          setError(
+            `A(z) "${file.name}" formátuma nem támogatott. Csak képfájlok tölthetők fel.`,
+          );
           return;
         }
-        const urls = (payload?.data?.urls ?? []) as string[];
-        const toAppend: SelectedImage[] = urls.map((url, index) => ({
-          id: `${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`,
-          name: selectedFiles[index]?.name || "kép",
-          url,
-        }));
+        if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+          setError(
+            `A(z) "${file.name}" fájl túl nagy. A maximális méret képenként 10MB.`,
+          );
+          return;
+        }
+      }
+
+      setUploading(true);
+      try {
+        // Upload directly to Supabase Storage — bypasses Vercel entirely.
+        // No 4.5 MB body limit, max file size is Supabase's 50 MB cap.
+        const supabase = createSupabaseBrowserClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (!user) {
+          setError("Nincs bejelentkezve.");
+          return;
+        }
+
+        const toAppend: SelectedImage[] = [];
+
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const file = selectedFiles[i];
+          const extension = ALLOWED_UPLOAD_TYPES[file.type] || "jpg";
+          const storagePath = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${extension}`;
+
+          const { error: uploadError } = await supabase.storage
+            .from("post-media")
+            .upload(storagePath, file, {
+              contentType: file.type,
+              upsert: false,
+            });
+
+          if (uploadError) {
+            setError(`A kép feltöltése sikertelen: ${file.name}.`);
+            // Clean up already-uploaded files from this batch
+            const pathsToClean = toAppend
+              .map((img) => {
+                try {
+                  const urlObj = new URL(img.url);
+                  const parts = urlObj.pathname.split("/post-media/");
+                  return parts.length === 2 ? parts[1] : null;
+                } catch {
+                  return null;
+                }
+              })
+              .filter((p): p is string => p !== null);
+            if (pathsToClean.length > 0) {
+              await supabase.storage.from("post-media").remove(pathsToClean);
+            }
+            return;
+          }
+
+          const { data: urlData } = supabase.storage
+            .from("post-media")
+            .getPublicUrl(storagePath);
+
+          toAppend.push({
+            id: `${Date.now()}-${i}-${Math.random().toString(16).slice(2)}`,
+            name: file.name || "kép",
+            url: urlData.publicUrl,
+          });
+        }
+
         setImages((prev) => [...prev, ...toAppend]);
       } catch {
         setError("Hálózati hiba történt képfeltöltés közben.");
@@ -377,8 +499,23 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
       }
     };
 
-    const removeImage = (id: string) =>
-      setImages((prev) => prev.filter((image) => image.id !== id));
+    /**
+     * Remove an image from the list.
+     * - Newly-uploaded images (not in originalImageUrls) are deleted from
+     *   Supabase Storage immediately so they never become orphans.
+     * - Original images (already saved to the post) are only removed from
+     *   local state here; the actual storage deletion happens only after a
+     *   successful save, so cancelling the modal never loses existing files.
+     */
+    const removeImage = (image: SelectedImage) => {
+      if (!originalImageUrls.has(image.url)) {
+        // Newly uploaded in this session — safe to delete immediately
+        fetch(`/api/uploads?url=${encodeURIComponent(image.url)}`, {
+          method: "DELETE",
+        }).catch(() => {});
+      }
+      setImages((prev) => prev.filter((i) => i.id !== image.id));
+    };
 
     const scheduleRegularPost = async () => {
       if (!selectedDate) return;
@@ -413,6 +550,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
           description,
           text,
           imageUrls: images.map((image) => image.url),
+          scheduledFor: scheduledDateTime.toISOString(),
         };
         if (editingPostId) bodyPayload.editId = editingPostId;
 
@@ -427,6 +565,17 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
           return;
         }
         setSuccessMessage("A poszt sikeresen időzítve! 🎉");
+        // Clean up original images that the user removed during editing.
+        // We only do this after a confirmed successful save so that cancelling
+        // the modal never permanently deletes files that are still referenced.
+        const currentUrls = new Set(images.map((img) => img.url));
+        for (const url of originalImageUrls) {
+          if (!currentUrls.has(url)) {
+            fetch(`/api/uploads?url=${encodeURIComponent(url)}`, {
+              method: "DELETE",
+            }).catch(() => {});
+          }
+        }
         closeAllModals();
         router.refresh();
       } catch {
@@ -699,19 +848,19 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
           selectedDate &&
           typeof document !== "undefined" &&
           createPortal(
-            <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 p-4 md:p-8 backdrop-blur-[2px] transition-all">
+            <div className="fixed inset-0 z-[9999] flex items-end md:items-center justify-center bg-black/80 p-0 md:p-8 backdrop-blur-[2px] transition-all overflow-y-auto overflow-x-hidden">
               <div
-                className={`flex flex-col md:flex-row items-stretch justify-center gap-4 transition-all duration-300 ease-in-out w-full max-w-6xl`}
+                className={`flex flex-col-reverse md:flex-row items-stretch justify-center gap-0 md:gap-4 transition-all duration-300 ease-in-out w-full max-w-6xl`}
               >
                 {/* Left AI Column (Expandable Panel) */}
                 <div
                   className={`shrink-0 overflow-hidden transition-all duration-300 ease-in-out ${
                     showAIAssistant
-                      ? "w-[300px] lg:w-[340px] opacity-100"
+                      ? "w-full md:w-[300px] lg:w-[340px] opacity-100"
                       : "w-0 opacity-0"
                   }`}
                 >
-                  <div className="w-[300px] lg:w-[340px] h-[70vh] min-h-[500px] bg-white text-[#1A1A1A] p-5 lg:p-6 flex flex-col justify-between rounded-2xl shadow-2xl border border-white/10 relative">
+                  <div className="w-full md:w-[300px] lg:w-[340px] max-h-[40vh] md:max-h-none md:h-[70vh] md:min-h-[400px] bg-white text-[#1A1A1A] p-4 md:p-5 lg:p-6 flex flex-col justify-between rounded-b-2xl md:rounded-2xl shadow-2xl border-t md:border border-gray-200 md:border-white/10 relative overflow-y-auto overflow-x-hidden">
                     <div>
                       <div className="flex items-center justify-between mb-6">
                         <div className="flex items-center gap-3 text-[#CC5833]">
@@ -737,7 +886,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                             value={aiPrompt}
                             onChange={(e) => setAiPrompt(e.target.value)}
                             placeholder="Pl.: Készíts egy Instagram posztot..."
-                            className="w-full h-40 bg-white/10 border border-gray-300 rounded-lg p-3 text-sm text-[#1A1A1A] placeholder-gray-400 focus:ring-1 focus:ring-[#CC5833] focus:border-[#CC5833] resize-none transition-all font-sans"
+                            className="w-full h-24 md:h-40 bg-white/10 border border-gray-300 rounded-lg p-3 text-sm text-[#1A1A1A] placeholder-gray-400 focus:ring-1 focus:ring-[#CC5833] focus:border-[#CC5833] resize-none transition-all font-sans"
                           />
                         </div>
 
@@ -774,7 +923,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                           </div>
                         </div>
                         {aiError && (
-                          <div className="p-3 mb-4 rounded-lg bg-red-900/30 text-red-400 text-sm border border-red-900/50">
+                          <div className="p-3 mb-4 rounded-lg bg-red-50 text-red-600 text-sm border border-red-200">
                             {aiError}
                           </div>
                         )}
@@ -802,30 +951,42 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
 
                 {/* Right Composition Column (Light Theme - Independent Block) */}
                 <div
-                  className={`w-full ${showAIAssistant ? "max-w-[600px]" : "max-w-2xl"} h-[70vh] min-h-[500px] shrink-0 bg-white rounded-xl shadow-2xl flex flex-col relative overflow-hidden transition-all duration-300 ease-in-out border border-gray-100`}
+                  className={`w-full ${showAIAssistant ? "max-w-full md:max-w-[600px] h-[55vh]" : "max-w-full md:max-w-2xl h-[85vh]"} md:h-[70vh] min-h-[250px] md:min-h-[500px] shrink-0 bg-white rounded-t-2xl md:rounded-xl shadow-2xl flex flex-col relative overflow-hidden transition-all duration-300 ease-in-out border border-gray-100`}
                 >
-                  <div className="h-16 lg:h-20 border-b border-gray-100 px-6 lg:px-8 flex items-center justify-between bg-white/50 backdrop-blur-sm z-10 shrink-0">
-                    <div>
-                      <h3 className="text-xl lg:text-2xl font-bold text-gray-900 tracking-tight font-sans">
-                        {editingPostId ? "Poszt szerkesztése" : "Új poszt"}
-                      </h3>
-                      <p className="text-xs text-gray-500 font-sans mt-0.5">
-                        {format(selectedDate, "yyyy. MMMM d., EEEE", {
-                          locale: hu,
-                        })}
-                      </p>
+                  <div className="border-b border-gray-100 px-4 md:px-6 lg:px-8 py-3 md:py-0 md:h-16 lg:h-20 flex flex-col md:flex-row md:items-center md:justify-between bg-white/50 backdrop-blur-sm z-10 shrink-0 gap-2 md:gap-0">
+                    {/* Title row — close button visible only on mobile */}
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-lg md:text-xl lg:text-2xl font-bold text-gray-900 tracking-tight font-sans">
+                          {editingPostId ? "Poszt szerkesztése" : "Új poszt"}
+                        </h3>
+                        <p className="text-[11px] md:text-xs text-gray-500 font-sans mt-0.5">
+                          {format(selectedDate, "yyyy. MMMM d., EEEE", {
+                            locale: hu,
+                          })}
+                        </p>
+                      </div>
+                      <button
+                        onClick={cancelAndCloseModal}
+                        className="flex md:hidden h-8 w-8 items-center justify-center rounded-full text-gray-400 hover:text-[#1A1A1A] hover:bg-gray-100 transition-colors"
+                      >
+                        <X className="h-5 w-5" />
+                      </button>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    {/* Controls row */}
+                    <div className="flex items-center gap-2 md:gap-3">
                       {!showAIAssistant && (
-                        <>
-                          <button
-                            onClick={() => setShowAIAssistant(true)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-100 text-[#CC5833] text-sm font-bold hover:bg-orange-100 transition"
-                          >
-                            <Sparkles className="w-4 h-4" /> AI Asszisztens
-                          </button>
-                        </>
+                        <button
+                          onClick={() => setShowAIAssistant(true)}
+                          className="flex items-center gap-1.5 px-2.5 md:px-3 py-1.5 rounded-lg bg-orange-100 text-[#CC5833] text-xs md:text-sm font-bold hover:bg-orange-200 transition"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 md:w-4 md:h-4" />{" "}
+                          <span className="hidden md:inline">
+                            AI Asszisztens
+                          </span>
+                          <span className="md:hidden">AI</span>
+                        </button>
                       )}
                       <div className="flex items-center bg-white border border-gray-200 rounded p-1">
                         <button
@@ -835,7 +996,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                               postToDelete !== editingPostId) ||
                             !connectedSet.has("instagram")
                           }
-                          className={`px-3 py-1 text-xs md:text-sm font-bold rounded flex items-center gap-1.5 transition-colors ${
+                          className={`px-2.5 md:px-3 py-1 text-xs md:text-sm font-bold rounded flex items-center gap-1 md:gap-1.5 transition-colors ${
                             platform === "instagram"
                               ? "bg-gray-100 text-[#1A1A1A]"
                               : "text-gray-500 hover:bg-gray-50"
@@ -850,7 +1011,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                               postToDelete !== editingPostId) ||
                             !connectedSet.has("facebook")
                           }
-                          className={`px-3 py-1 text-xs md:text-sm font-bold rounded flex items-center gap-1.5 transition-colors ${
+                          className={`px-2.5 md:px-3 py-1 text-xs md:text-sm font-bold rounded flex items-center gap-1 md:gap-1.5 transition-colors ${
                             platform === "facebook"
                               ? "bg-gray-100 text-[#1A1A1A]"
                               : "text-gray-500 hover:bg-gray-50"
@@ -861,15 +1022,15 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                       </div>
 
                       <button
-                        onClick={closeAllModals}
-                        className="flex h-8 w-8 items-center justify-center rounded-full text-gray-400 hover:text-[#1A1A1A] hover:bg-gray-100 transition-colors"
+                        onClick={cancelAndCloseModal}
+                        className="hidden md:flex h-8 w-8 items-center justify-center rounded-full text-gray-400 hover:text-[#1A1A1A] hover:bg-gray-100 transition-colors"
                       >
                         <X className="h-5 w-5" />
                       </button>
                     </div>
                   </div>
 
-                  <div className="flex-1 p-6 lg:p-8 overflow-y-auto flex flex-col">
+                  <div className="flex-1 p-4 md:p-6 lg:p-8 overflow-y-auto flex flex-col">
                     <textarea
                       value={platform === "instagram" ? description : text}
                       onChange={(e) =>
@@ -897,22 +1058,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                               />
                               <button
                                 type="button"
-                                onClick={async () => {
-                                  setImages((prev) =>
-                                    prev.filter((i) => i.id !== image.id),
-                                  );
-                                  try {
-                                    await fetch(
-                                      `/api/uploads?url=${encodeURIComponent(image.url)}`,
-                                      { method: "DELETE" },
-                                    );
-                                  } catch (err) {
-                                    console.error(
-                                      "Kép törlése sikertelen:",
-                                      err,
-                                    );
-                                  }
-                                }}
+                                onClick={() => removeImage(image)}
                                 className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-red-500 text-white opacity-0 shadow-md transition group-hover:opacity-100 hover:bg-red-600 scale-90 group-hover:scale-100"
                               >
                                 <X className="h-3.5 w-3.5" />
@@ -923,7 +1069,7 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                       )}
 
                       {images.length < 10 && (
-                        <label className="border-2 border-dashed border-gray-300 rounded-xl p-8 flex flex-col items-center justify-center text-center hover:border-[#CC5833]/50 hover:bg-[#CC5833]/5 transition-all cursor-pointer group mt-auto">
+                        <label className="border-2 border-dashed border-gray-300 rounded-xl p-4 md:p-8 flex flex-col items-center justify-center text-center hover:border-[#CC5833]/50 hover:bg-[#CC5833]/5 transition-all cursor-pointer group mt-auto">
                           <div className="w-12 h-12 bg-white rounded-full flex items-center justify-center shadow-sm mb-3 group-hover:scale-110 transition-transform">
                             <ImagePlus className="h-6 w-6 text-gray-400 group-hover:text-[#CC5833]" />
                           </div>
@@ -956,11 +1102,28 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                   </div>
 
                   {/* Bottom Footer Actions */}
-                  <div className="h-16 border-t border-gray-100 px-6 lg:px-8 flex items-center justify-between bg-white/50 backdrop-blur-sm shrink-0">
-                    <div className="flex items-center gap-4">
-                      <div className="relative">
+                  <div className="border-t border-gray-100 px-4 md:px-6 lg:px-8 py-3 md:py-0 md:h-16 flex flex-col md:flex-row md:items-center md:justify-between bg-white/50 backdrop-blur-sm shrink-0 gap-2 md:gap-0">
+                    <div className="flex items-center gap-3 md:gap-4">
+                      <div>
                         <button
-                          onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                          ref={emojiButtonRef}
+                          onClick={() => {
+                            if (!showEmojiPicker && emojiButtonRef.current) {
+                              const rect =
+                                emojiButtonRef.current.getBoundingClientRect();
+                              const pickerH = 400;
+                              const pickerW = 320;
+                              let top = rect.top - pickerH - 8;
+                              let left = rect.left;
+                              // Clamp within viewport so it doesn't go off-screen on mobile
+                              if (top < 8) top = rect.bottom + 8;
+                              if (left + pickerW > window.innerWidth - 8)
+                                left = window.innerWidth - pickerW - 8;
+                              if (left < 8) left = 8;
+                              setEmojiPickerPos({ top, left });
+                            }
+                            setShowEmojiPicker((prev) => !prev);
+                          }}
                           className="text-gray-400 hover:text-gray-600 transition-colors p-2 -ml-2 rounded-full hover:bg-gray-100"
                         >
                           <svg
@@ -979,26 +1142,38 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                             <line x1="15" y1="9" x2="15.01" y2="9"></line>
                           </svg>
                         </button>
-                        {showEmojiPicker && (
-                          <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 shadow-2xl rounded-2xl overflow-hidden border border-gray-100 animate-in slide-in-from-bottom-2 duration-200">
-                            <EmojiPicker
-                              onEmojiClick={(emojiData) => {
-                                if (platform === "instagram") {
-                                  setDescription(
-                                    (prev) => prev + emojiData.emoji,
-                                  );
-                                } else {
-                                  setText((prev) => prev + emojiData.emoji);
-                                }
-                                setShowEmojiPicker(false);
+                        {showEmojiPicker &&
+                          emojiPickerPos &&
+                          typeof document !== "undefined" &&
+                          createPortal(
+                            <div
+                              ref={emojiPickerRef}
+                              style={{
+                                position: "fixed",
+                                top: emojiPickerPos.top,
+                                left: emojiPickerPos.left,
+                                zIndex: 99999,
                               }}
-                              width={320}
-                              height={400}
-                            />
-                          </div>
-                        )}
+                              className="shadow-2xl rounded-2xl overflow-hidden border border-gray-100 animate-in slide-in-from-bottom-2 duration-200"
+                            >
+                              <EmojiPicker
+                                onEmojiClick={(emojiData) => {
+                                  if (platform === "instagram") {
+                                    setDescription(
+                                      (prev) => prev + emojiData.emoji,
+                                    );
+                                  } else {
+                                    setText((prev) => prev + emojiData.emoji);
+                                  }
+                                  setShowEmojiPicker(false);
+                                }}
+                                width={Math.min(320, window.innerWidth - 16)}
+                                height={350}
+                              />
+                            </div>,
+                            document.body,
+                          )}
                       </div>
-                      <div className="h-4 w-px bg-gray-300"></div>
                       <div className="h-4 w-px bg-gray-300"></div>
                       <div
                         className="flex items-center gap-2 cursor-pointer group px-2 py-1 rounded hover:bg-gray-100 transition-colors"
@@ -1026,23 +1201,28 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3 relative">
+                    <div className="flex items-center gap-3 w-full md:w-auto">
                       {error && (
-                        <span className="text-[11px] font-bold tracking-wide uppercase text-red-500 absolute right-0 -top-8 bg-red-50 px-2 py-1 border border-red-100 rounded-md whitespace-nowrap shadow-sm">
+                        <p className="text-xs text-red-600 flex-1 md:flex-none md:max-w-[200px] text-right leading-tight">
                           {error}
-                        </span>
+                        </p>
                       )}
                       <button
                         onClick={() => void scheduleRegularPost()}
                         disabled={loading || uploading}
-                        className="px-6 py-2.5 rounded bg-[#CC5833] text-white text-sm font-bold tracking-wide shadow-glow hover:bg-[#D96B47] transition-colors font-sans disabled:opacity-50 flex items-center gap-2"
+                        className="flex-1 md:flex-initial px-4 md:px-6 py-2.5 rounded bg-[#CC5833] text-white text-sm font-bold tracking-wide shadow-glow hover:bg-[#D96B47] transition-colors font-sans disabled:opacity-50 flex items-center justify-center gap-2"
                       >
                         {loading ? (
                           <Loader2 className="w-4 h-4 animate-spin" />
                         ) : null}
-                        {editingPostId
-                          ? "Módosítások Mentése"
-                          : "Poszt Létrehozása"}
+                        <span className="md:hidden">
+                          {editingPostId ? "Mentés" : "Létrehozás"}
+                        </span>
+                        <span className="hidden md:inline">
+                          {editingPostId
+                            ? "Módosítások Mentése"
+                            : "Poszt Létrehozása"}
+                        </span>
                       </button>
                     </div>
                   </div>

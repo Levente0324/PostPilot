@@ -34,23 +34,35 @@ function shouldForceFree(status: string | null | undefined) {
 async function registerWebhookEvent(event: Stripe.Event) {
   const supabaseAdmin = getSupabaseAdmin();
 
+  // Check if we've already processed this event (idempotency guard)
+  const { data: existing } = await supabaseAdmin
+    .from("stripe_webhook_events")
+    .select("id")
+    .eq("event_id", event.id)
+    .maybeSingle();
+
+  if (existing) {
+    return { shouldProcess: false };
+  }
+
+  // Don't insert yet — we insert AFTER successful processing to avoid
+  // permanently skipping events that fail mid-processing on retry.
+  return { shouldProcess: true };
+}
+
+async function markWebhookEventProcessed(event: Stripe.Event) {
+  const supabaseAdmin = getSupabaseAdmin();
+
   const { error } = await supabaseAdmin.from("stripe_webhook_events").insert({
     event_id: event.id,
     event_type: event.type,
   });
 
-  if (!error) return { shouldProcess: true };
-
-  if (error.code === "23505") {
-    return { shouldProcess: false };
+  // If duplicate key (23505), another concurrent handler already marked it — fine.
+  // If table missing (42P01), continue without idempotency table.
+  if (error && error.code !== "23505" && error.code !== "42P01") {
+    console.error("Failed to mark webhook event as processed:", error);
   }
-
-  // If table does not exist yet, continue without idempotency table.
-  if (error.code === "42P01") {
-    return { shouldProcess: true };
-  }
-
-  throw error;
 }
 
 async function findProfileIdByCustomerId(customerId: string) {
@@ -130,7 +142,34 @@ async function resolveProfileId(params: {
 }
 
 /**
- * Marks a profile as paid (basic or pro) based on the subscription's price ID.
+ * Trims the user's scheduled posts so that at most `keepCount` remain.
+ * Always keeps the N posts closest to today (ascending order), deletes the rest.
+ * This implements smart downgrade cleanup (#16).
+ */
+async function trimScheduledPostsToLimit(profileId: string, keepCount: number) {
+  const supabaseAdmin = getSupabaseAdmin();
+
+  const { data: scheduledRows } = await supabaseAdmin
+    .from("scheduled_posts")
+    .select("id, post_id, scheduled_for, posts!inner(user_id)")
+    .eq("posts.user_id", profileId)
+    .eq("status", "scheduled")
+    .order("scheduled_for", { ascending: true }); // closest first
+
+  const all = (scheduledRows ?? []) as any[];
+  if (all.length <= keepCount) return; // nothing to remove
+
+  const toRemove = all.slice(keepCount); // everything beyond the limit
+  const postIds = toRemove.map((r: any) => r.post_id);
+
+  if (postIds.length > 0) {
+    await supabaseAdmin.from("posts").delete().in("id", postIds);
+  }
+}
+
+/**
+ * Marks a profile as paid (pro or elite) based on the subscription's price ID.
+ * Also trims excess scheduled posts when downgrading tiers.
  */
 async function markPaidByProfileId(
   profileId: string,
@@ -148,6 +187,9 @@ async function markPaidByProfileId(
       monthly_post_limit: resolved.limit,
     })
     .eq("id", profileId);
+
+  // Trim excess posts to fit the new plan limit (handles downgrades like elite→pro)
+  await trimScheduledPostsToLimit(profileId, resolved.limit);
 }
 
 async function updateSubscriptionStatusOnly(
@@ -167,16 +209,9 @@ async function markFreeAndClearPostsByProfileId(
 ) {
   const supabaseAdmin = getSupabaseAdmin();
 
-  const { data: scheduledRows } = await supabaseAdmin
-    .from("scheduled_posts")
-    .select("post_id, posts!inner(user_id)")
-    .eq("posts.user_id", profileId)
-    .eq("status", "scheduled");
-
-  const postIds = (scheduledRows ?? []).map((row: any) => row.post_id);
-  if (postIds.length) {
-    await supabaseAdmin.from("posts").delete().in("id", postIds);
-  }
+  // Smart cleanup: keep the 3 closest scheduled posts (free tier limit).
+  // This is better than deleting everything — users keep their most imminent posts.
+  await trimScheduledPostsToLimit(profileId, 3);
 
   await supabaseAdmin
     .from("profiles")
@@ -333,6 +368,18 @@ export async function POST(req: Request) {
           break;
         }
 
+        // Guard: if the customer still has another active subscription (e.g. they
+        // upgraded in-place and the old sub was deleted immediately after), do NOT
+        // downgrade to free — the invoice.paid for the new sub will set the correct plan.
+        const remainingActive = await stripe.subscriptions.list({
+          customer: customerId,
+          status: "active",
+          limit: 1,
+        });
+        if (remainingActive.data.length > 0) {
+          break;
+        }
+
         await markFreeAndClearPostsByProfileId(profileId, "inactive");
         break;
       }
@@ -349,15 +396,31 @@ export async function POST(req: Request) {
         });
 
         if (profileId) {
-          // Resolve plan from the invoice's subscription
+          // Resolve plan from the invoice's subscription.
+          // invoice.subscription can be a string ID or an expanded object.
           let priceId = "";
-          const invoiceSubscription = (invoice as any).subscription;
-          if (typeof invoiceSubscription === "string") {
-            const subscription =
-              await stripe.subscriptions.retrieve(invoiceSubscription);
+          const rawSub = (invoice as any).subscription;
+          if (typeof rawSub === "string") {
+            const subscription = await stripe.subscriptions.retrieve(rawSub);
             priceId = extractPriceId(subscription);
+          } else if (rawSub && typeof rawSub === "object" && rawSub.id) {
+            // Expanded subscription object — extract price directly
+            priceId = rawSub.items?.data?.[0]?.price?.id ?? "";
+            if (!priceId) {
+              // Fallback: re-fetch from Stripe to be safe
+              const subscription = await stripe.subscriptions.retrieve(
+                rawSub.id as string,
+              );
+              priceId = extractPriceId(subscription);
+            }
           }
-          await markPaidByProfileId(profileId, "active", priceId);
+
+          // Only update if we actually have a price ID.
+          // An empty price means we couldn't determine the plan — skip to avoid
+          // accidentally downgrading the user to free.
+          if (priceId) {
+            await markPaidByProfileId(profileId, "active", priceId);
+          }
         }
         break;
       }
@@ -383,6 +446,10 @@ export async function POST(req: Request) {
       default:
         break;
     }
+
+    // Mark event as processed AFTER successful handling.
+    // This ensures failed processing is retried by Stripe (returns 500 below).
+    await markWebhookEventProcessed(event);
 
     return new NextResponse(null, { status: 200 });
   } catch (error) {

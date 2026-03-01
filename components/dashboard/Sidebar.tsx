@@ -51,7 +51,7 @@ export function Sidebar({ planLabel, isPro, isElite, userEmail }: Props) {
                 rocket_launch
               </span>
             </div>
-            <span className="font-display italic text-2xl font-bold tracking-tight text-white/90">
+            <span className="font-display text-2xl font-bold tracking-tight text-white/90">
               PostRocket
             </span>
           </Link>

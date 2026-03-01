@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 const BUCKET = "post-media";
 const MAX_FILES_PER_REQUEST = 10;
-const MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15MB
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB — uploads now go browser→Supabase directly
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -127,7 +127,7 @@ export async function POST(request: Request) {
 
     if (file.size > MAX_FILE_SIZE_BYTES) {
       return NextResponse.json(
-        { error: `A(z) ${file.name} fájl túl nagy. A maximális méret 15MB.` },
+        { error: `A(z) ${file.name} fájl túl nagy. A maximális méret 10MB.` },
         { status: 400 },
       );
     }
