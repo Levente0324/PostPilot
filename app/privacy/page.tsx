@@ -64,23 +64,23 @@ export default function PrivacyPolicyPage() {
                 folyamaton keresztül.
               </li>
               <li>
-                <strong>Hozzáférési tokenek:</strong> a Meta (Facebook/Instagram)
-                API-hoz szükséges hozzáférési tokenek, amelyeket AES-256-GCM
-                titkosítással tárolunk az adatbázisban.
+                <strong>Hozzáférési tokenek:</strong> a Meta
+                (Facebook/Instagram) API-hoz szükséges hozzáférési tokenek,
+                amelyeket AES-256-GCM titkosítással tárolunk az adatbázisban.
               </li>
               <li>
                 <strong>Felhasználói tartalom:</strong> a felhasználó által
                 létrehozott posztok szövege és feltöltött képei.
               </li>
               <li>
-                <strong>Számlázási adatok:</strong> a Stripe fizetési szolgáltató
-                kezeli a bankkártya adatokat — mi kizárólag a Stripe ügyfél
-                azonosítót és az előfizetési státuszt tároljuk.
+                <strong>Számlázási adatok:</strong> a Stripe fizetési
+                szolgáltató kezeli a bankkártya adatokat — mi kizárólag a Stripe
+                ügyfél azonosítót és az előfizetési státuszt tároljuk.
               </li>
               <li>
-                <strong>Használati adatok:</strong> rate limiting célú naplóbejegyzések
-                (felhasználói azonosító, művelet típusa, időbélyeg). Ezek 90 nap
-                után automatikusan törlésre kerülnek.
+                <strong>Használati adatok:</strong> rate limiting célú
+                naplóbejegyzések (felhasználói azonosító, művelet típusa,
+                időbélyeg). Ezek 90 nap után automatikusan törlésre kerülnek.
               </li>
             </ul>
           </section>
@@ -101,8 +101,8 @@ export default function PrivacyPolicyPage() {
                 előfizetési csomagok kezelése a Stripe-on keresztül.
               </li>
               <li>
-                <strong>Visszaélés-megelőzés</strong> (jogos érdek — GDPR 6. cikk
-                (1) f)): rate limiting és használati naplózás.
+                <strong>Visszaélés-megelőzés</strong> (jogos érdek — GDPR 6.
+                cikk (1) f)): rate limiting és használati naplózás.
               </li>
             </ul>
           </section>
@@ -111,19 +111,23 @@ export default function PrivacyPolicyPage() {
             <h2 className="text-xl font-semibold text-gray-900 mb-3">
               4. Adatfeldolgozók és harmadik felek
             </h2>
-            <p>A Szolgáltatás az alábbi harmadik fél szolgáltatókat veszi igénybe:</p>
+            <p>
+              A Szolgáltatás az alábbi harmadik fél szolgáltatókat veszi
+              igénybe:
+            </p>
             <ul className="list-disc pl-6 space-y-2 mt-2">
               <li>
                 <strong>Supabase</strong> (adatbázis, autentikáció, fájltárolás)
                 — az EU-ban tárolt adatokkal.
               </li>
               <li>
-                <strong>Vercel</strong> (webhosting) — a weboldal kiszolgálásáért
-                felelős.
+                <strong>Vercel</strong> (webhosting) — a weboldal
+                kiszolgálásáért felelős.
               </li>
               <li>
-                <strong>Stripe</strong> (fizetés feldolgozás) — bankkártya adatokat
-                kizárólag a Stripe kezeli, a PostRocket nem tárolja azokat.
+                <strong>Stripe</strong> (fizetés feldolgozás) — bankkártya
+                adatokat kizárólag a Stripe kezeli, a PostRocket nem tárolja
+                azokat.
               </li>
               <li>
                 <strong>Meta Platforms (Facebook, Instagram)</strong> — a
@@ -156,8 +160,8 @@ export default function PrivacyPolicyPage() {
                 eltávolításra kerülnek a tárolóból.
               </li>
               <li>
-                A Meta hozzáférési tokenek a közösségi média fiók lecsatlakoztatásakor
-                azonnal törlésre kerülnek.
+                A Meta hozzáférési tokenek a közösségi média fiók
+                lecsatlakoztatásakor azonnal törlésre kerülnek.
               </li>
             </ul>
           </section>
@@ -205,9 +209,9 @@ export default function PrivacyPolicyPage() {
                 tárolásra.
               </li>
               <li>
-                Az adatbázis soralapú biztonsági szabályokkal (Row Level Security)
-                van védve — a felhasználók kizárólag saját adataikhoz férhetnek
-                hozzá.
+                Az adatbázis soralapú biztonsági szabályokkal (Row Level
+                Security) van védve — a felhasználók kizárólag saját adataikhoz
+                férhetnek hozzá.
               </li>
               <li>
                 A Stripe webhook-ok aláírás-ellenőrzéssel és idempotencia
@@ -221,10 +225,10 @@ export default function PrivacyPolicyPage() {
               8. Cookie-k
             </h2>
             <p>
-              A Szolgáltatás kizárólag a működéshez szükséges cookie-kat
-              használ (autentikációs munkamenet cookie-k). Nem használunk
-              harmadik féltől származó nyomkövető cookie-kat, analitikai
-              cookie-kat vagy reklámcélú cookie-kat.
+              A Szolgáltatás kizárólag a működéshez szükséges cookie-kat használ
+              (autentikációs munkamenet cookie-k). Nem használunk harmadik
+              féltől származó nyomkövető cookie-kat, analitikai cookie-kat vagy
+              reklámcélú cookie-kat.
             </p>
           </section>
 
