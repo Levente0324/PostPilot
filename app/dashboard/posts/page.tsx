@@ -80,10 +80,7 @@ export default async function PostsPage() {
           </div>
         </header>
 
-        <PostsDashboardClient
-          scheduledPosts={scheduledPosts}
-          profile={profile ?? { plan: "free", subscription_status: "inactive" }}
-        />
+        <PostsDashboardClient scheduledPosts={scheduledPosts} />
       </div>
     </PostDashboardProvider>
   );

@@ -66,9 +66,8 @@ type ScheduledPost = {
   image_url: string | null;
 };
 
-type ProfileSummary = {
-  plan: string | null;
-  subscription_status: string | null;
+type Props = {
+  scheduledPosts: ScheduledPost[];
 };
 
 type SelectedImage = {
@@ -76,11 +75,6 @@ type SelectedImage = {
   name: string;
   url: string;
   size?: number;
-};
-
-type Props = {
-  scheduledPosts: ScheduledPost[];
-  profile: ProfileSummary;
 };
 
 const WEEK_DAYS = [
@@ -142,10 +136,7 @@ export interface PostSchedulerRef {
 }
 
 export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
-  function PostScheduler(
-    { scheduledPosts, profile },
-    ref: React.Ref<PostSchedulerRef>,
-  ) {
+  function PostScheduler({ scheduledPosts }, ref: React.Ref<PostSchedulerRef>) {
     const router = useRouter();
     const rootRef = useRef<HTMLDivElement>(null);
     const timeRef = useRef<HTMLInputElement>(null);
@@ -195,11 +186,6 @@ export const PostScheduler = forwardRef<PostSchedulerRef, Props>(
     const now = new Date();
     const minDate = startOfDay(now);
     const maxDate = endOfDay(addDays(minDate, 30));
-    const proAccess =
-      (profile.plan === "pro" || profile.plan === "elite") &&
-      (profile.subscription_status === "active" ||
-        profile.subscription_status === "trialing");
-    const _ = proAccess; // referenced below (prevents unused lint)
 
     useEffect(() => {
       if (!rootRef.current) return;

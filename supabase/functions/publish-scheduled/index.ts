@@ -1,9 +1,8 @@
 /**
- * Supabase Edge Function: notify-due-posts (formerly publish-scheduled)
+ * Supabase Edge Function: publish-scheduled (Email Notification System)
  *
- * Replaces the Meta API auto-publishing flow.
- * Now sends EMAIL NOTIFICATIONS to users when their scheduled posts are due,
- * so they can copy-paste and post manually on their own social media accounts.
+ * Sends email reminders to users when their scheduled posts are due,
+ * so they can copy-paste the content and post to their social media manually.
  *
  * Deploy:  supabase functions deploy publish-scheduled
  * Invoke:  POST https://<ref>.supabase.co/functions/v1/publish-scheduled
@@ -12,12 +11,15 @@
  * Required Supabase secrets (set via: supabase secrets set KEY=value):
  *   PUBLISH_JOB_SECRET        — shared secret for cron auth
  *   RESEND_API_KEY            — Resend email API key (https://resend.com)
- *   APP_URL                   — e.g. https://postrocket.app
+ *   APP_URL                   — e.g. https://postrocket.hu
  *   SUPABASE_URL              (auto-injected by Supabase)
  *   SUPABASE_SERVICE_ROLE_KEY (auto-injected by Supabase)
  */
 
-import { createClient } from "@supabase/supabase-js";
+// deno-lint-ignore-file no-explicit-any
+/// <reference lib="deno.ns" />
+
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,7 +45,7 @@ type DuePost = {
 };
 
 // ---------------------------------------------------------------------------
-// Auth — timing-safe comparison (no Node.js dependency)
+// Auth — timing-safe comparison (no Node.js crypto dependency)
 // ---------------------------------------------------------------------------
 function timingSafeEqual(a: string, b: string): boolean {
   const encA = new TextEncoder().encode(a);
@@ -144,7 +146,7 @@ async function sendReminderEmail(
             <td style="padding:20px 32px;border-top:1px solid #f3f4f6;">
               <p style="margin:0;font-size:12px;color:#9ca3af;line-height:1.6;">
                 Ezt az emailt a PostRocket küldötte, mert ez a poszt a naptáradban szerepelt.<br>
-                Leiratkozni az emlékeztetőkről: <a href="${appUrl}/dashboard/account-billing" style="color:#f97316;">fiók beállítások</a>
+                Beállítások: <a href="${appUrl}/dashboard/account-billing" style="color:#f97316;">fiók beállítások</a>
               </p>
             </td>
           </tr>
@@ -163,7 +165,7 @@ async function sendReminderEmail(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: "PostRocket <no-reply@postrocket.app>",
+      from: "PostRocket <no-reply@postrocket.hu>",
       to: [toEmail],
       subject: `🚀 PostRocket – Ütemezett posztod most esedékes! (${scheduledDate})`,
       html: emailBody,
@@ -173,7 +175,7 @@ async function sendReminderEmail(
   if (!res.ok) {
     const payload = await res.json().catch(() => ({}));
     throw new Error(
-      `Resend API error ${res.status}: ${payload?.message ?? "unknown"}`,
+      `Resend API error ${res.status}: ${(payload as any)?.message ?? "unknown"}`,
     );
   }
 }
@@ -205,7 +207,7 @@ Deno.serve(async (req: Request) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const appUrl = Deno.env.get("APP_URL") ?? "https://postrocket.app";
+  const appUrl = Deno.env.get("APP_URL") ?? "https://postrocket.hu";
 
   const admin = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
@@ -226,7 +228,7 @@ Deno.serve(async (req: Request) => {
     .limit(BATCH_LIMIT);
 
   if (fetchError) {
-    console.error("notify-due-posts: query error", fetchError.message);
+    console.error("publish-scheduled: query error", fetchError.message);
     return new Response(JSON.stringify({ error: "Internal error." }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
@@ -240,7 +242,9 @@ Deno.serve(async (req: Request) => {
     const userEmail = item.posts?.profiles?.email;
 
     if (!userEmail) {
-      console.warn(`notify-due-posts: no email for post ${item.id}, skipping.`);
+      console.warn(
+        `publish-scheduled: no email for post ${item.id}, skipping.`,
+      );
       results.push({
         id: item.id,
         success: false,
@@ -257,7 +261,7 @@ Deno.serve(async (req: Request) => {
         appUrl,
       );
 
-      // Mark as notified + published (handled)
+      // Mark as notified + published
       await admin
         .from("scheduled_posts")
         .update({
@@ -281,13 +285,11 @@ Deno.serve(async (req: Request) => {
     } catch (err: unknown) {
       const errorMsg =
         err instanceof Error ? err.message : "Notification failed";
-      console.error(`notify-due-posts: failed for ${item.id}:`, errorMsg);
+      console.error(`publish-scheduled: failed for ${item.id}:`, errorMsg);
 
       await admin
         .from("scheduled_posts")
-        .update({
-          error_message: errorMsg.slice(0, 1000),
-        })
+        .update({ error_message: errorMsg.slice(0, 1000) })
         .eq("id", item.id);
 
       results.push({ id: item.id, success: false, message: errorMsg });
